@@ -1,8 +1,9 @@
 """GraphQL schema for ClaimGuard — exposes fraud scores to the openIMIS frontend."""
 
 import graphene
-from claimguard.models import ClaimFraudScore
+from claimguard.models import ClaimFraudScore, FraudAuditLog
 from django.core.exceptions import PermissionDenied
+from django.utils import timezone
 from graphene_django import DjangoObjectType
 
 
@@ -70,7 +71,53 @@ class Query(graphene.ObjectType):
         return qs.order_by("-risk_score")[:limit]
 
 
-class Mutation(graphene.ObjectType):
-    """ClaimGuard has no public mutations yet — overrides go via REST."""
+class OverrideClaimFraudScoreMutation(graphene.Mutation):
+    """Human-in-the-loop override — logs justification for ML retraining pipeline."""
 
-    pass
+    class Arguments:
+        claim_id = graphene.Int(required=True)
+        risk_score = graphene.Int(required=True)
+        reason = graphene.String(required=True)
+
+    fraud_score = graphene.Field(ClaimFraudScoreGQLType)
+
+    @classmethod
+    def mutate(cls, root, info, claim_id, risk_score, reason):
+        _ensure_authenticated(info)
+        reason = (reason or "").strip()
+        if not reason:
+            raise PermissionDenied("Override reason is required.")
+
+        score = ClaimFraudScore.objects.filter(
+            claim_id=claim_id, is_deleted=False
+        ).first()
+        if not score:
+            raise PermissionDenied("Fraud score not found for this claim.")
+
+        new_score = max(0, min(100, int(risk_score)))
+        score.risk_score = new_score
+        score.is_overridden = True
+        score.override_reason = reason
+        score.overridden_by = info.context.user
+        score.overridden_at = timezone.now()
+        score.save()
+
+        FraudAuditLog.objects.create(
+            claim_id=claim_id,
+            fraud_score=score,
+            action=FraudAuditLog.Action.OVERRIDDEN,
+            actor=info.context.user,
+            detail={"new_score": new_score, "reason": reason},
+        )
+
+        from claimguard.scoring.engine import _sync_claim_json_ext
+
+        _sync_claim_json_ext(score.claim, score)
+
+        return OverrideClaimFraudScoreMutation(fraud_score=score)
+
+
+class Mutation(graphene.ObjectType):
+    """ClaimGuard GraphQL mutations."""
+
+    override_claim_fraud_score = OverrideClaimFraudScoreMutation.Field()

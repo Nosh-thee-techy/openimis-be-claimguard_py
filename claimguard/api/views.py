@@ -114,4 +114,9 @@ def override_fraud_score(request, claim_id: int):
         actor=request.user,
         detail={"new_score": new_score, "reason": reason},
     )
+
+    from claimguard.scoring.engine import _sync_claim_json_ext
+
+    _sync_claim_json_ext(score.claim, score)
+
     return Response(_serialize_score(score))
