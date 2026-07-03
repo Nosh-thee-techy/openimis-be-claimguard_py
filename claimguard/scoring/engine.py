@@ -65,6 +65,7 @@ def _sync_claim_json_ext(claim: Claim, score_obj: ClaimFraudScore) -> None:
         "risk_score": score_obj.risk_score,
         "risk_tier": score_obj.risk_tier,
         "badge_colour": score_obj.badge_colour,
+        "decision_reason": score_obj.decision_reason,
     }
     Claim.objects.filter(pk=claim.pk).update(json_ext=ext)
 
