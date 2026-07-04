@@ -49,7 +49,8 @@ class Query(graphene.ObjectType):
 
     claim_fraud_score = graphene.Field(
         ClaimFraudScoreGQLType,
-        claim_id=graphene.Int(required=True),
+        claim_id=graphene.Int(),
+        claim_uuid=graphene.String(),
     )
     claim_fraud_scores = graphene.List(
         ClaimFraudScoreGQLType,
@@ -57,11 +58,14 @@ class Query(graphene.ObjectType):
         limit=graphene.Int(default_value=50),
     )
 
-    def resolve_claim_fraud_score(self, info, claim_id):
+    def resolve_claim_fraud_score(self, info, claim_id=None, claim_uuid=None):
         _ensure_authenticated(info)
-        return ClaimFraudScore.objects.filter(
-            claim_id=claim_id, is_deleted=False
-        ).first()
+        qs = ClaimFraudScore.objects.filter(is_deleted=False)
+        if claim_uuid:
+            return qs.filter(claim__uuid=claim_uuid).first()
+        if claim_id is not None:
+            return qs.filter(claim_id=claim_id).first()
+        return None
 
     def resolve_claim_fraud_scores(self, info, tier=None, limit=50):
         _ensure_authenticated(info)
@@ -75,25 +79,31 @@ class OverrideClaimFraudScoreMutation(graphene.Mutation):
     """Human-in-the-loop override — logs justification for ML retraining pipeline."""
 
     class Arguments:
-        claim_id = graphene.Int(required=True)
+        claim_id = graphene.Int()
+        claim_uuid = graphene.String()
         risk_score = graphene.Int(required=True)
         reason = graphene.String(required=True)
 
     fraud_score = graphene.Field(ClaimFraudScoreGQLType)
 
     @classmethod
-    def mutate(cls, root, info, claim_id, risk_score, reason):
+    def mutate(cls, root, info, risk_score, reason, claim_id=None, claim_uuid=None):
         _ensure_authenticated(info)
         reason = (reason or "").strip()
         if not reason:
             raise PermissionDenied("Override reason is required.")
+        if not claim_id and not claim_uuid:
+            raise PermissionDenied("claim_id or claim_uuid is required.")
 
-        score = ClaimFraudScore.objects.filter(
-            claim_id=claim_id, is_deleted=False
-        ).first()
+        qs = ClaimFraudScore.objects.filter(is_deleted=False)
+        if claim_uuid:
+            score = qs.filter(claim__uuid=claim_uuid).first()
+        else:
+            score = qs.filter(claim_id=claim_id).first()
         if not score:
             raise PermissionDenied("Fraud score not found for this claim.")
 
+        resolved_claim_id = score.claim_id
         new_score = max(0, min(100, int(risk_score)))
         score.risk_score = new_score
         score.is_overridden = True
@@ -103,7 +113,7 @@ class OverrideClaimFraudScoreMutation(graphene.Mutation):
         score.save()
 
         FraudAuditLog.objects.create(
-            claim_id=claim_id,
+            claim_id=resolved_claim_id,
             fraud_score=score,
             action=FraudAuditLog.Action.OVERRIDDEN,
             actor=info.context.user,
